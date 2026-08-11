@@ -1,0 +1,8 @@
+
+streamlit
+pandas==2.2.2
+langchain
+langchain-core
+langchain-chroma
+langchain-google-genai
+chromadb
