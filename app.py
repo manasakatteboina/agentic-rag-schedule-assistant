@@ -1,4 +1,3 @@
-
 import os
 import pandas as pd
 import streamlit as st
@@ -84,11 +83,6 @@ columns = [
     "description"
 ]
 
-schedule_df = pd.DataFrame(
-    schedule_data,
-    columns=columns
-)
-
 
 # ============================================================
 # GEMINI
@@ -107,14 +101,14 @@ embeddings = GoogleGenerativeAIEmbeddings(
 
 
 # ============================================================
-# CREATE DOCUMENTS
+# CREATE DOCUMENTS (takes a dataframe now, instead of reading a global)
 # ============================================================
 
-def create_documents():
+def create_documents(df):
 
     docs = []
 
-    for _, row in schedule_df.iterrows():
+    for _, row in df.iterrows():
 
         text = f"""
 Date: {row['date']}
@@ -139,19 +133,27 @@ Description: {row['description']}
     return docs
 
 
-documents = create_documents()
-
-
 # ============================================================
-# CHROMADB
+# SESSION STATE INITIALIZATION
+# This runs only ONCE per browser session (not on every rerun),
+# which is the key fix: schedule_df and vector_store now survive
+# across every chat message instead of resetting each time.
 # ============================================================
 
-vector_store = Chroma(
-    collection_name="schedule_app_collection",
-    embedding_function=embeddings
-)
+if "schedule_df" not in st.session_state:
+    st.session_state.schedule_df = pd.DataFrame(
+        schedule_data,
+        columns=columns
+    )
 
-vector_store.add_documents(documents)
+if "vector_store" not in st.session_state:
+    documents = create_documents(st.session_state.schedule_df)
+
+    st.session_state.vector_store = Chroma(
+        collection_name="schedule_app_collection",
+        embedding_function=embeddings
+    )
+    st.session_state.vector_store.add_documents(documents)
 
 
 # ============================================================
@@ -165,7 +167,7 @@ def get_schedule(query: str) -> str:
     on the user's date, time, or question.
     """
 
-    retrieved_docs = vector_store.similarity_search(
+    retrieved_docs = st.session_state.vector_store.similarity_search(
         query,
         k=5
     )
@@ -203,8 +205,7 @@ def update_schedule(
     Adds, updates, or removes schedule entries.
     """
 
-    global schedule_df
-    global vector_store
+    df = st.session_state.schedule_df
 
     # ADD
     if action.lower() == "add":
@@ -218,9 +219,9 @@ def update_schedule(
             "description": description
         }
 
-        schedule_df = pd.concat(
+        df = pd.concat(
             [
-                schedule_df,
+                df,
                 pd.DataFrame([new_event])
             ],
             ignore_index=True
@@ -232,27 +233,27 @@ def update_schedule(
     elif action.lower() == "update":
 
         mask = (
-            (schedule_df["title"].str.lower() == old_title.lower())
+            (df["title"].str.lower() == old_title.lower())
             &
-            (schedule_df["date"] == old_date)
+            (df["date"] == old_date)
             &
-            (schedule_df["start_time"] == old_start_time)
+            (df["start_time"] == old_start_time)
         )
 
         if mask.sum() == 0:
             return "No matching event found."
 
         if date:
-            schedule_df.loc[mask, "date"] = date
+            df.loc[mask, "date"] = date
 
         if start_time:
-            schedule_df.loc[mask, "start_time"] = start_time
+            df.loc[mask, "start_time"] = start_time
 
         if end_time:
-            schedule_df.loc[mask, "end_time"] = end_time
+            df.loc[mask, "end_time"] = end_time
 
         if title:
-            schedule_df.loc[mask, "title"] = title
+            df.loc[mask, "title"] = title
 
         message = "Schedule updated successfully."
 
@@ -260,34 +261,39 @@ def update_schedule(
     elif action.lower() == "remove":
 
         mask = (
-            (schedule_df["title"].str.lower() == old_title.lower())
+            (df["title"].str.lower() == old_title.lower())
             &
-            (schedule_df["date"] == old_date)
+            (df["date"] == old_date)
         )
 
         if mask.sum() == 0:
             return "No matching event found."
 
-        schedule_df = schedule_df[~mask]
+        df = df[~mask]
 
         message = f"Removed '{old_title}' from the schedule."
 
     else:
         return "Invalid action. Use add, update, or remove."
 
+    # --------------------------------------------------------
+    # SAVE UPDATED DATAFRAME BACK TO SESSION STATE
+    # --------------------------------------------------------
+
+    st.session_state.schedule_df = df
 
     # --------------------------------------------------------
-    # REFRESH CHROMADB
+    # REFRESH CHROMADB IN SESSION STATE
     # --------------------------------------------------------
 
-    new_documents = create_documents()
+    new_documents = create_documents(df)
 
-    vector_store = Chroma(
-        collection_name="schedule_updated_app",
+    st.session_state.vector_store = Chroma(
+        collection_name="schedule_app_collection",
         embedding_function=embeddings
     )
 
-    vector_store.add_documents(new_documents)
+    st.session_state.vector_store.add_documents(new_documents)
 
     return message + " Schedule database updated."
 
