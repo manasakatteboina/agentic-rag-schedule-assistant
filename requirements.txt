@@ -1,6 +1,5 @@
-
 streamlit
-pandas==2.2.2
+pandas
 langchain
 langchain-core
 langchain-chroma
