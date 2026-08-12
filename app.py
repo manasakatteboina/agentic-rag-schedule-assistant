@@ -13,6 +13,16 @@ from langchain.agents import create_agent
 
 
 # ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="Agentic RAG Schedule Assistant",
+    page_icon="📅"
+)
+
+
+# ============================================================
 # API KEY
 # ============================================================
 
@@ -101,7 +111,7 @@ embeddings = GoogleGenerativeAIEmbeddings(
 
 
 # ============================================================
-# CREATE DOCUMENTS (takes a dataframe now, instead of reading a global)
+# CREATE DOCUMENTS
 # ============================================================
 
 def create_documents(df):
@@ -135,25 +145,39 @@ Description: {row['description']}
 
 # ============================================================
 # SESSION STATE INITIALIZATION
-# This runs only ONCE per browser session (not on every rerun),
-# which is the key fix: schedule_df and vector_store now survive
-# across every chat message instead of resetting each time.
 # ============================================================
 
 if "schedule_df" not in st.session_state:
+
     st.session_state.schedule_df = pd.DataFrame(
         schedule_data,
         columns=columns
     )
 
+
+if "messages" not in st.session_state:
+
+    st.session_state.messages = []
+
+
+# ============================================================
+# CREATE / INITIALIZE VECTOR STORE
+# ============================================================
+
 if "vector_store" not in st.session_state:
-    documents = create_documents(st.session_state.schedule_df)
+
+    documents = create_documents(
+        st.session_state.schedule_df
+    )
 
     st.session_state.vector_store = Chroma(
         collection_name="schedule_app_collection",
         embedding_function=embeddings
     )
-    st.session_state.vector_store.add_documents(documents)
+
+    st.session_state.vector_store.add_documents(
+        documents
+    )
 
 
 # ============================================================
@@ -167,9 +191,28 @@ def get_schedule(query: str) -> str:
     on the user's date, time, or question.
     """
 
-    retrieved_docs = st.session_state.vector_store.similarity_search(
-        query,
-        k=5
+    # Make sure vector store exists
+    if "vector_store" not in st.session_state:
+
+        documents = create_documents(
+            st.session_state.schedule_df
+        )
+
+        st.session_state.vector_store = Chroma(
+            collection_name="schedule_app_collection",
+            embedding_function=embeddings
+        )
+
+        st.session_state.vector_store.add_documents(
+            documents
+        )
+
+    retrieved_docs = (
+        st.session_state.vector_store
+        .similarity_search(
+            query,
+            k=5
+        )
     )
 
     if not retrieved_docs:
@@ -178,6 +221,7 @@ def get_schedule(query: str) -> str:
     result = ""
 
     for doc in retrieved_docs:
+
         result += doc.page_content
         result += "\n" + "-" * 40 + "\n"
 
@@ -205,10 +249,16 @@ def update_schedule(
     Adds, updates, or removes schedule entries.
     """
 
-    df = st.session_state.schedule_df
+    df = st.session_state.schedule_df.copy()
 
+    action = action.lower().strip()
+
+
+    # ========================================================
     # ADD
-    if action.lower() == "add":
+    # ========================================================
+
+    if action == "add":
 
         new_event = {
             "date": date,
@@ -227,10 +277,17 @@ def update_schedule(
             ignore_index=True
         )
 
-        message = f"Added '{title}' on {date} at {start_time}."
+        message = (
+            f"Added '{title}' on {date} "
+            f"at {start_time}."
+        )
 
-    # UPDATE
-    elif action.lower() == "update":
+
+    # ========================================================
+    # UPDATE / MOVE
+    # ========================================================
+
+    elif action == "update":
 
         mask = (
             (df["title"].str.lower() == old_title.lower())
@@ -255,10 +312,20 @@ def update_schedule(
         if title:
             df.loc[mask, "title"] = title
 
+        if event_type:
+            df.loc[mask, "type"] = event_type
+
+        if description:
+            df.loc[mask, "description"] = description
+
         message = "Schedule updated successfully."
 
+
+    # ========================================================
     # REMOVE
-    elif action.lower() == "remove":
+    # ========================================================
+
+    elif action == "remove":
 
         mask = (
             (df["title"].str.lower() == old_title.lower())
@@ -271,20 +338,30 @@ def update_schedule(
 
         df = df[~mask]
 
-        message = f"Removed '{old_title}' from the schedule."
+        message = (
+            f"Removed '{old_title}' "
+            f"from the schedule."
+        )
+
 
     else:
-        return "Invalid action. Use add, update, or remove."
 
-    # --------------------------------------------------------
-    # SAVE UPDATED DATAFRAME BACK TO SESSION STATE
-    # --------------------------------------------------------
+        return (
+            "Invalid action. "
+            "Use add, update, or remove."
+        )
+
+
+    # ========================================================
+    # SAVE UPDATED DATAFRAME
+    # ========================================================
 
     st.session_state.schedule_df = df
 
-    # --------------------------------------------------------
-    # REFRESH CHROMADB IN SESSION STATE
-    # --------------------------------------------------------
+
+    # ========================================================
+    # REBUILD VECTOR STORE
+    # ========================================================
 
     new_documents = create_documents(df)
 
@@ -293,19 +370,27 @@ def update_schedule(
         embedding_function=embeddings
     )
 
-    st.session_state.vector_store.add_documents(new_documents)
+    st.session_state.vector_store.add_documents(
+        new_documents
+    )
+
 
     return message + " Schedule database updated."
 
 
 # ============================================================
-# AGENT
+# AGENT TOOLS
 # ============================================================
 
 tools = [
     get_schedule,
     update_schedule
 ]
+
+
+# ============================================================
+# AGENT SYSTEM PROMPT
+# ============================================================
 
 system_prompt = """
 You are an Agentic RAG Schedule Assistant.
@@ -315,7 +400,9 @@ You manage the user's schedule for the next 30 days.
 You have two tools.
 
 1. get_schedule
-Use it when the user asks about:
+
+Use get_schedule when the user asks about:
+
 - existing events
 - meetings
 - workshops
@@ -326,7 +413,9 @@ Use it when the user asks about:
 - availability
 
 2. update_schedule
-Use it when the user wants to:
+
+Use update_schedule when the user wants to:
+
 - add an event
 - update an event
 - move an event
@@ -343,8 +432,19 @@ Do not invent schedule information.
 When checking availability, retrieve the
 schedule first and identify conflicts.
 
+For moving an event, use action='update'.
+
+For adding an event, use action='add'.
+
+For removing an event, use action='remove'.
+
 Answer clearly and simply.
 """
+
+
+# ============================================================
+# CREATE AGENT
+# ============================================================
 
 schedule_agent = create_agent(
     llm,
@@ -357,12 +457,9 @@ schedule_agent = create_agent(
 # STREAMLIT UI
 # ============================================================
 
-st.set_page_config(
-    page_title="Agentic RAG Schedule Assistant",
-    page_icon="📅"
+st.title(
+    "📅 Agentic RAG Schedule Assistant"
 )
-
-st.title("📅 Agentic RAG Schedule Assistant")
 
 st.write(
     "Ask about your schedule or add, update, "
@@ -370,19 +467,24 @@ st.write(
 )
 
 
-# Chat history
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
+# ============================================================
+# DISPLAY CHAT HISTORY
+# ============================================================
 
 for message in st.session_state.messages:
 
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    with st.chat_message(
+        message["role"]
+    ):
+
+        st.markdown(
+            message["content"]
+        )
 
 
-# User input
+# ============================================================
+# USER INPUT
+# ============================================================
 
 user_query = st.chat_input(
     "Ask about your schedule..."
@@ -391,6 +493,10 @@ user_query = st.chat_input(
 
 if user_query:
 
+    # --------------------------------------------------------
+    # SAVE USER MESSAGE
+    # --------------------------------------------------------
+
     st.session_state.messages.append(
         {
             "role": "user",
@@ -398,13 +504,25 @@ if user_query:
         }
     )
 
+
+    # --------------------------------------------------------
+    # DISPLAY USER MESSAGE
+    # --------------------------------------------------------
+
     with st.chat_message("user"):
+
         st.markdown(user_query)
 
 
+    # --------------------------------------------------------
+    # ASSISTANT RESPONSE
+    # --------------------------------------------------------
+
     with st.chat_message("assistant"):
 
-        with st.spinner("Checking your schedule..."):
+        with st.spinner(
+            "Checking your schedule..."
+        ):
 
             response = schedule_agent.invoke(
                 {
@@ -417,9 +535,16 @@ if user_query:
                 }
             )
 
-            answer = response["messages"][-1].content
 
-            # Handle Gemini structured content
+            answer = (
+                response["messages"][-1].content
+            )
+
+
+            # ------------------------------------------------
+            # HANDLE GEMINI STRUCTURED CONTENT
+            # ------------------------------------------------
+
             if isinstance(answer, list):
 
                 text_parts = []
@@ -427,19 +552,36 @@ if user_query:
                 for item in answer:
 
                     if isinstance(item, dict):
+
                         if item.get("type") == "text":
+
                             text_parts.append(
-                                item.get("text", "")
+                                item.get(
+                                    "text",
+                                    ""
+                                )
                             )
 
                     elif isinstance(item, str):
+
                         text_parts.append(item)
 
-                answer = "\n".join(text_parts)
 
+                answer = "\n".join(
+                    text_parts
+                )
+
+
+            # ------------------------------------------------
+            # DISPLAY ANSWER
+            # ------------------------------------------------
 
             st.markdown(answer)
 
+
+    # --------------------------------------------------------
+    # SAVE ASSISTANT MESSAGE
+    # --------------------------------------------------------
 
     st.session_state.messages.append(
         {
