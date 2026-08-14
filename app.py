@@ -1,4 +1,6 @@
 import os
+import re
+import uuid
 import pandas as pd
 import streamlit as st
 
@@ -34,7 +36,7 @@ if not GOOGLE_API_KEY:
 
 
 # ============================================================
-# SAMPLE 30-DAY SCHEDULE
+# SAMPLE SCHEDULE
 # ============================================================
 
 schedule_data = [
@@ -95,7 +97,7 @@ columns = [
 
 
 # ============================================================
-# GEMMA 4 LLM
+# GEMMA MODEL
 # ============================================================
 
 llm = ChatGoogleGenerativeAI(
@@ -138,9 +140,9 @@ Description: {row['description']}
             Document(
                 page_content=text,
                 metadata={
-                    "date": row["date"],
-                    "title": row["title"],
-                    "type": row["type"]
+                    "date": str(row["date"]),
+                    "title": str(row["title"]),
+                    "type": str(row["type"])
                 }
             )
         )
@@ -149,11 +151,8 @@ Description: {row['description']}
 
 
 # ============================================================
-# INITIALIZE SESSION STATE
+# INITIALIZE SCHEDULE DATA
 # ============================================================
-
-# IMPORTANT:
-# schedule_df is created BEFORE any tool can use it.
 
 if "schedule_df" not in st.session_state:
 
@@ -174,13 +173,37 @@ if "vector_store" not in st.session_state:
     )
 
     st.session_state.vector_store = Chroma(
-        collection_name="schedule_app_collection",
+        collection_name="schedule_app_" + uuid.uuid4().hex,
         embedding_function=embeddings
     )
 
-    st.session_state.vector_store.add_documents(
-        documents
+    if documents:
+
+        st.session_state.vector_store.add_documents(
+            documents
+        )
+
+
+# ============================================================
+# REFRESH VECTOR STORE
+# ============================================================
+
+def refresh_vector_store():
+
+    documents = create_documents(
+        st.session_state.schedule_df
     )
+
+    st.session_state.vector_store = Chroma(
+        collection_name="schedule_app_" + uuid.uuid4().hex,
+        embedding_function=embeddings
+    )
+
+    if documents:
+
+        st.session_state.vector_store.add_documents(
+            documents
+        )
 
 
 # ============================================================
@@ -190,11 +213,9 @@ if "vector_store" not in st.session_state:
 @tool
 def get_schedule(query: str) -> str:
     """
-    Retrieves relevant schedule information based
-    on the user's date, time, or question.
+    Retrieves relevant schedule information.
     """
 
-    # Safety check
     if "schedule_df" not in st.session_state:
 
         st.session_state.schedule_df = pd.DataFrame(
@@ -204,27 +225,15 @@ def get_schedule(query: str) -> str:
 
     if "vector_store" not in st.session_state:
 
-        documents = create_documents(
-            st.session_state.schedule_df
-        )
-
-        st.session_state.vector_store = Chroma(
-            collection_name="schedule_app_collection",
-            embedding_function=embeddings
-        )
-
-        st.session_state.vector_store.add_documents(
-            documents
-        )
+        refresh_vector_store()
 
     retrieved_docs = (
-        st.session_state.vector_store.similarity_search(
-            query,
-            k=5
-        )
+        st.session_state.vector_store
+        .similarity_search(query, k=5)
     )
 
     if not retrieved_docs:
+
         return "No schedule information found."
 
     result = ""
@@ -255,10 +264,9 @@ def update_schedule(
     old_start_time: str = ""
 ) -> str:
     """
-    Adds, updates, moves, or removes schedule entries.
+    Adds, updates, moves, or removes schedule events.
     """
 
-    # Safety check
     if "schedule_df" not in st.session_state:
 
         st.session_state.schedule_df = pd.DataFrame(
@@ -268,7 +276,7 @@ def update_schedule(
 
     df = st.session_state.schedule_df.copy()
 
-    action = action.lower().strip()
+    action = action.strip().lower()
 
 
     # ========================================================
@@ -280,8 +288,8 @@ def update_schedule(
         if not date or not start_time or not title:
 
             return (
-                "To add an event, please provide "
-                "date, start time, and title."
+                "Please provide date, start time, "
+                "and title."
             )
 
         new_event = {
@@ -303,7 +311,7 @@ def update_schedule(
 
         message = (
             f"Added '{title}' on {date} "
-            f"at {start_time}."
+            f"from {start_time} to {end_time}."
         )
 
 
@@ -316,31 +324,33 @@ def update_schedule(
         if not old_title or not old_date:
 
             return (
-                "To update or move an event, "
-                "please provide the old event title "
+                "Please provide the old event title "
                 "and old date."
             )
 
         mask = (
-            (df["title"].astype(str).str.lower()
-             == old_title.lower())
-            &
-            (df["date"].astype(str)
-             == old_date)
+            df["title"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            ==
+            old_title.strip().lower()
+        ) & (
+            df["date"]
+            .astype(str)
+            .str.strip()
+            ==
+            old_date.strip()
         )
-
-        # If old start time was supplied,
-        # use it to identify the exact event.
 
         if old_start_time:
 
-            mask = (
-                mask
-                &
-                (
-                    df["start_time"].astype(str)
-                    == old_start_time
-                )
+            mask = mask & (
+                df["start_time"]
+                .astype(str)
+                .str.strip()
+                ==
+                old_start_time.strip()
             )
 
         if mask.sum() == 0:
@@ -351,41 +361,28 @@ def update_schedule(
             )
 
         # Change date
-
         if date:
-
             df.loc[mask, "date"] = date
 
         # Change start time
-
         if start_time:
-
             df.loc[mask, "start_time"] = start_time
 
         # Change end time
-
         if end_time:
-
             df.loc[mask, "end_time"] = end_time
 
         # Change title
-
         if title:
-
             df.loc[mask, "title"] = title
 
         # Change type
-
-        if event_type:
-
+        if event_type and event_type != "Task":
             df.loc[mask, "type"] = event_type
 
         # Change description
-
         if description:
-
             df.loc[mask, "description"] = description
-
 
         if action == "move":
 
@@ -409,27 +406,33 @@ def update_schedule(
         if not old_title or not old_date:
 
             return (
-                "To remove an event, please provide "
-                "the event title and date."
+                "Please provide the event title "
+                "and date."
             )
 
         mask = (
-            (df["title"].astype(str).str.lower()
-             == old_title.lower())
-            &
-            (df["date"].astype(str)
-             == old_date)
+            df["title"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            ==
+            old_title.strip().lower()
+        ) & (
+            df["date"]
+            .astype(str)
+            .str.strip()
+            ==
+            old_date.strip()
         )
 
         if old_start_time:
 
-            mask = (
-                mask
-                &
-                (
-                    df["start_time"].astype(str)
-                    == old_start_time
-                )
+            mask = mask & (
+                df["start_time"]
+                .astype(str)
+                .str.strip()
+                ==
+                old_start_time.strip()
             )
 
         if mask.sum() == 0:
@@ -442,8 +445,8 @@ def update_schedule(
         df = df[~mask].reset_index(drop=True)
 
         message = (
-            f"Removed '{old_title}' from "
-            f"{old_date}."
+            f"Removed '{old_title}' "
+            f"from {old_date}."
         )
 
 
@@ -460,37 +463,23 @@ def update_schedule(
 
 
     # ========================================================
-    # SAVE DATAFRAME
+    # SAVE UPDATED DATAFRAME
     # ========================================================
 
     st.session_state.schedule_df = df
 
 
     # ========================================================
-    # REBUILD CHROMA VECTOR STORE
+    # REFRESH RAG DATABASE
     # ========================================================
 
-    new_documents = create_documents(df)
+    refresh_vector_store()
 
-    # Use a new collection name every time we refresh.
-    # This avoids old records remaining in Chroma.
 
-    collection_name = (
-        "schedule_app_collection_"
-        + str(len(df))
+    return (
+        message +
+        " Schedule database updated."
     )
-
-    st.session_state.vector_store = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings
-    )
-
-    st.session_state.vector_store.add_documents(
-        new_documents
-    )
-
-
-    return message + " Schedule database updated."
 
 
 # ============================================================
@@ -512,12 +501,11 @@ You are an Agentic RAG Schedule Assistant.
 
 You manage the user's schedule.
 
-You have two tools.
+TOOLS:
 
 1. get_schedule
 
-Use get_schedule when the user asks about:
-
+Use this for:
 - existing events
 - meetings
 - workshops
@@ -526,38 +514,43 @@ Use get_schedule when the user asks about:
 - dates
 - times
 - availability
-- schedule information
+- schedule questions
 
 2. update_schedule
 
-Use update_schedule when the user wants to:
+Use this for:
+- adding events
+- updating events
+- moving events
+- removing events
 
-- add an event
-- update an event
-- move an event
-- remove an event
-
-IMPORTANT RULES:
-
-Always use get_schedule when you need to
-retrieve existing schedule information.
-
-Always use update_schedule when the user
-asks to change the schedule.
+IMPORTANT:
 
 Never invent schedule information.
 
-When checking availability, first retrieve
-the schedule and identify conflicts.
+When the user asks about an existing event,
+use get_schedule.
 
-For moving an event, use action="move".
+When the user wants to change an event,
+use update_schedule.
 
-For changing event information, use
-action="update".
+For adding:
+action = "add"
 
-For adding an event, use action="add".
+For updating:
+action = "update"
 
-For deleting an event, use action="remove".
+For moving:
+action = "move"
+
+For removing:
+action = "remove"
+
+Always actually use the tool when the user
+asks to change the schedule.
+
+Do not claim that an event was changed unless
+the update_schedule tool was successfully used.
 
 Answer clearly and simply.
 """
@@ -578,7 +571,9 @@ schedule_agent = create_agent(
 # STREAMLIT UI
 # ============================================================
 
-st.title("📅 Agentic RAG Schedule Assistant")
+st.title(
+    "📅 Agentic RAG Schedule Assistant"
+)
 
 st.write(
     "Ask about your schedule or add, update, "
@@ -597,9 +592,13 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
 
-    with st.chat_message(message["role"]):
+    with st.chat_message(
+        message["role"]
+    ):
 
-        st.markdown(message["content"])
+        st.markdown(
+            message["content"]
+        )
 
 
 # ============================================================
@@ -611,9 +610,55 @@ user_query = st.chat_input(
 )
 
 
+# ============================================================
+# DIRECT COMMAND FUNCTIONS
+# ============================================================
+
+def find_event_by_text(date, query):
+
+    df = st.session_state.schedule_df
+
+    matching = df[
+        df["date"].astype(str).str.strip() == date
+    ]
+
+    query_lower = query.lower()
+
+    for event_title in matching["title"]:
+
+        if str(event_title).lower() in query_lower:
+
+            return str(event_title)
+
+    return None
+
+
+def extract_dates(text):
+
+    return re.findall(
+        r"\d{4}-\d{2}-\d{2}",
+        text
+    )
+
+
+def extract_times(text):
+
+    return re.findall(
+        r"\b(?:0?[1-9]|1[0-2]):[0-5][0-9]\s*(?:AM|PM)\b",
+        text,
+        flags=re.IGNORECASE
+    )
+
+
+# ============================================================
+# HANDLE USER QUERY
+# ============================================================
+
 if user_query:
 
-    # Save user message
+    # --------------------------------------------------------
+    # SAVE USER MESSAGE
+    # --------------------------------------------------------
 
     st.session_state.messages.append(
         {
@@ -627,86 +672,280 @@ if user_query:
         st.markdown(user_query)
 
 
+    query_lower = user_query.lower().strip()
+
+    direct_result = None
+
+
     # ========================================================
-    # ASSISTANT RESPONSE
+    # REMOVE
     # ========================================================
 
-    with st.chat_message("assistant"):
+    if query_lower.startswith("remove"):
 
-        with st.spinner(
-            "Checking your schedule..."
-        ):
+        dates = extract_dates(user_query)
 
-            try:
+        if dates:
 
-                response = schedule_agent.invoke(
+            old_date = dates[0]
+
+            event_title = find_event_by_text(
+                old_date,
+                user_query
+            )
+
+            if event_title:
+
+                direct_result = update_schedule.invoke(
                     {
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": user_query
-                            }
-                        ]
+                        "action": "remove",
+                        "old_title": event_title,
+                        "old_date": old_date
                     }
                 )
 
-                answer = response[
-                    "messages"
-                ][-1].content
+            else:
 
-
-                # ====================================================
-                # HANDLE GEMINI / GEMMA STRUCTURED CONTENT
-                # ====================================================
-
-                if isinstance(answer, list):
-
-                    text_parts = []
-
-                    for item in answer:
-
-                        if isinstance(item, dict):
-
-                            if item.get("type") == "text":
-
-                                text_parts.append(
-                                    item.get(
-                                        "text",
-                                        ""
-                                    )
-                                )
-
-                        elif isinstance(item, str):
-
-                            text_parts.append(item)
-
-                    answer = "\n".join(
-                        text_parts
-                    )
-
-
-                # ====================================================
-                # FINAL ANSWER
-                # ====================================================
-
-                st.markdown(answer)
-
-
-            except Exception as e:
-
-                answer = (
-                    "Sorry, an error occurred: "
-                    + str(e)
+                direct_result = (
+                    "I could not identify the event "
+                    f"on {old_date}. Please include "
+                    "the event title."
                 )
 
-                st.error(answer)
+        else:
+
+            direct_result = (
+                "Please provide the date of the "
+                "event you want to remove."
+            )
 
 
-    # Save assistant response
+    # ========================================================
+    # MOVE
+    # ========================================================
 
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": answer
-        }
-    )
+    elif query_lower.startswith("move"):
+
+        dates = extract_dates(user_query)
+
+        if len(dates) >= 2:
+
+            old_date = dates[0]
+            new_date = dates[1]
+
+            event_title = find_event_by_text(
+                old_date,
+                user_query
+            )
+
+            if event_title:
+
+                times = extract_times(user_query)
+
+                arguments = {
+                    "action": "move",
+                    "old_title": event_title,
+                    "old_date": old_date,
+                    "date": new_date
+                }
+
+                # If two times are included,
+                # treat them as new start/end times.
+                if len(times) >= 2:
+
+                    arguments["start_time"] = times[0]
+                    arguments["end_time"] = times[1]
+
+                elif len(times) == 1:
+
+                    arguments["start_time"] = times[0]
+
+                direct_result = update_schedule.invoke(
+                    arguments
+                )
+
+            else:
+
+                direct_result = (
+                    f"I could not find an event on "
+                    f"{old_date}. Please include "
+                    "the exact event title."
+                )
+
+        else:
+
+            direct_result = (
+                "For moving an event, provide the "
+                "old date and new date."
+            )
+
+
+    # ========================================================
+    # UPDATE
+    # ========================================================
+
+    elif query_lower.startswith("update"):
+
+        dates = extract_dates(user_query)
+
+        if len(dates) >= 2:
+
+            old_date = dates[0]
+            new_date = dates[1]
+
+            event_title = find_event_by_text(
+                old_date,
+                user_query
+            )
+
+            if event_title:
+
+                times = extract_times(user_query)
+
+                arguments = {
+                    "action": "update",
+                    "old_title": event_title,
+                    "old_date": old_date,
+                    "date": new_date
+                }
+
+                if len(times) >= 2:
+
+                    arguments["start_time"] = times[0]
+                    arguments["end_time"] = times[1]
+
+                elif len(times) == 1:
+
+                    arguments["start_time"] = times[0]
+
+                direct_result = update_schedule.invoke(
+                    arguments
+                )
+
+            else:
+
+                direct_result = (
+                    f"I could not find an event on "
+                    f"{old_date}. Please include "
+                    "the exact event title."
+                )
+
+        else:
+
+            direct_result = (
+                "For updating an event, provide the "
+                "old date and new date."
+            )
+
+
+    # ========================================================
+    # SHOW DIRECT RESULT
+    # ========================================================
+
+    if direct_result is not None:
+
+        with st.chat_message("assistant"):
+
+            st.markdown(direct_result)
+
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": direct_result
+            }
+        )
+
+
+    # ========================================================
+    # NORMAL AGENT / RAG QUESTIONS
+    # ========================================================
+
+    else:
+
+        with st.chat_message("assistant"):
+
+            with st.spinner(
+                "Checking your schedule..."
+            ):
+
+                try:
+
+                    response = schedule_agent.invoke(
+                        {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": user_query
+                                }
+                            ]
+                        }
+                    )
+
+                    answer = response[
+                        "messages"
+                    ][-1].content
+
+
+                    # --------------------------------------------
+                    # HANDLE STRUCTURED CONTENT
+                    # --------------------------------------------
+
+                    if isinstance(answer, list):
+
+                        text_parts = []
+
+                        for item in answer:
+
+                            if isinstance(
+                                item,
+                                dict
+                            ):
+
+                                if item.get(
+                                    "type"
+                                ) == "text":
+
+                                    text_parts.append(
+                                        item.get(
+                                            "text",
+                                            ""
+                                        )
+                                    )
+
+                            elif isinstance(
+                                item,
+                                str
+                            ):
+
+                                text_parts.append(
+                                    item
+                                )
+
+                        answer = "\n".join(
+                            text_parts
+                        )
+
+
+                    st.markdown(answer)
+
+
+                except Exception as e:
+
+                    answer = (
+                        "Sorry, an error occurred: "
+                        + str(e)
+                    )
+
+                    st.error(answer)
+
+
+        # ----------------------------------------------------
+        # SAVE ASSISTANT MESSAGE
+        # ----------------------------------------------------
+
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer
+            }
+        )
